@@ -1,0 +1,195 @@
+/*
+ * To change this license header, choose License Headers in Project Properties.
+ * To change this template file, choose Tools | Templates
+ * and open the template in the editor.
+ */
+package com.example.sparkservice;
+
+import java.io.BufferedWriter;
+import java.io.File;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.PrintWriter;
+import java.io.Serializable;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Map;
+import java.util.TreeMap;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+import org.apache.spark.SparkConf;
+import org.apache.spark.api.java.JavaRDD;
+import org.apache.spark.api.java.JavaSparkContext;
+import org.apache.spark.api.java.function.Function;
+import org.apache.spark.mllib.classification.NaiveBayes;
+import org.apache.spark.mllib.classification.NaiveBayesModel;
+import org.apache.spark.mllib.feature.HashingTF;
+import org.apache.spark.mllib.linalg.Vector;
+import org.apache.spark.mllib.regression.LabeledPoint;
+
+/**
+ *
+ * @author daniele
+ */
+public class SparkService implements Serializable{
+
+    private final String PATH_MODEL = "/home/hduser/BizProject/myNaiveBayesModel/";
+    private final String PATH_HAM_DATA = "/home/hduser/BizProject/ham.txt";
+    private final String PATH_SPAM_DATA = "/home/hduser/BizProject/spam.txt";
+
+    private final Map<Integer, Mail> mails; 
+    private final Map<Integer, Request> requests;
+    private int idMail = 0;
+    private int idReq = 0;
+
+    private static SparkConf conf;
+    private static JavaSparkContext jsc;
+
+    /** SPARK SERVICE ON YARN **/
+    /*
+    public SparkService() {
+        mails = new TreeMap<>();
+        requests = new TreeMap<>();         
+        conf = new SparkConf()
+                .setAppName("FilterMail")
+                .setMaster("yarn-client")                 
+                .setSparkHome("/usr/local/src/spark-1.6.1-bin-hadoop2.6/");
+        jsc = new JavaSparkContext(conf);        
+    }
+    */
+    
+    /** SPARK SERVICE LOCAL **/    
+    public SparkService() {
+        mails = new TreeMap<>();
+        requests = new TreeMap<>();
+        conf = new SparkConf()
+                .setAppName("FilterMail")
+                .setMaster("local")
+                .setSparkHome("/usr/local/src/spark/spark-1.6.1/");
+        jsc = new JavaSparkContext(conf);
+    }
+    
+
+    public Collection<Mail> listMail() {
+        System.out.println("Rotta List Mail");
+        return mails.values();
+    }
+    
+    public Collection<Request> listReq() {
+        System.out.println("Rotta List Request");
+        return requests.values();
+    }
+
+    public void queryMail(Mail mail) {
+        System.out.println("Rotta Filter Mail");
+        mail.setId(idMail);
+        HashingTF tf = new HashingTF(10000);
+        Vector mailTF = tf.transform(Arrays.asList(mail.toString().split(" ")));
+        NaiveBayesModel model = NaiveBayesModel.load(jsc.sc(), PATH_MODEL);
+        double prediction = model.predict(mailTF);        
+        if (prediction == 0.0) {
+            mail.setClassification("HAM");
+        } else {
+            mail.setClassification("SPAM");
+        }
+        mails.put(idMail++, mail);
+    }
+
+    public Request updateHam(Mail mail) {
+        Request req = new Request(idReq,"UPDATE MODEL");
+        System.out.println("Rotta Update Ham");                
+        appendData(PATH_HAM_DATA, mail.toString());
+        if(train())
+            req.setState("SUCCESS");
+        else
+            req.setState("FAILED");
+        requests.put(idReq++, req);
+        return req;
+    }
+
+    public Request updateSpam(Mail mail) {        
+        Request req = new Request(idReq++,"UPDATE MODEL");
+        System.out.println("Rotta Update Spam");        
+        appendData(PATH_SPAM_DATA, mail.toString());
+        if(train())
+            req.setState("SUCCESS");
+        else
+            req.setState("FAILED");
+        requests.put(idReq++, req);
+        return req;
+    }
+
+    public boolean train() {
+        System.out.println("Rotta Training Model");
+        File dir_model = new File(PATH_MODEL);
+        if(deleteModel(dir_model))
+            System.out.println("Model Successfully deleted");
+        else
+            System.out.println("Model not deleted");
+
+        try{
+            JavaRDD<LabeledPoint> data = dataset();        
+        
+            NaiveBayesModel model = NaiveBayes.train(data.rdd(), 1.0, "multinomial");        
+            model.save(jsc.sc(), PATH_MODEL);
+        }catch(Exception e){
+            e.printStackTrace();
+            return false;
+        }
+        return true;
+    }
+
+    public void appendData(String path, String mail) {
+        FileWriter fw = null;
+        try {
+            File data = new File(path);
+            fw = new FileWriter(data, true);
+            BufferedWriter bw = new BufferedWriter(fw);
+            PrintWriter out = new PrintWriter(bw);
+            out.println(mail);
+            out.close();
+        } catch (IOException ex) {
+            Logger.getLogger(SparkService.class.getName()).log(Level.SEVERE, null, ex);
+        } finally {
+            try {
+                fw.close();
+            } catch (IOException ex) {
+                Logger.getLogger(SparkService.class.getName()).log(Level.SEVERE, null, ex);
+            }
+        }
+    }
+
+    public boolean deleteModel(File model) {
+        if (model.isDirectory()) {
+            String[] children = model.list();
+            for (int i = 0; i < children.length; i++) {
+                boolean success = deleteModel(new File(model, children[i]));
+                if (!success) {
+                    return false;
+                }
+            }
+        }
+        return model.delete();
+    }
+    
+    public static JavaRDD<LabeledPoint> dataset(){
+        final HashingTF tf = new HashingTF(10000); 
+        JavaRDD<String> ham = jsc.textFile("/home/hduser/BizProject/ham.txt");
+        JavaRDD<String> spam = jsc.textFile("/home/hduser/BizProject/spam.txt");
+        JavaRDD<LabeledPoint> hamLabelledTF = ham.map(new Function<String, LabeledPoint>() {
+            @Override
+            public LabeledPoint call(String email) {
+                return new LabeledPoint(0, tf.transform(Arrays.asList(email.split(" "))));
+            }
+        });
+        JavaRDD<LabeledPoint> spamLabelledTF = spam.map(new Function<String, LabeledPoint>() {
+            @Override
+            public LabeledPoint call(String email) {
+                return new LabeledPoint(1, tf.transform(Arrays.asList(email.split(" "))));
+            }
+        });
+        JavaRDD<LabeledPoint> data = spamLabelledTF.union(hamLabelledTF);        
+        return data;
+    }
+}
+

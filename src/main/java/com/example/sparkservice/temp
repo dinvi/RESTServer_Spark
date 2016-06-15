@@ -1,0 +1,56 @@
+/** ROUTE BUILDER SPARK SESSION **/
+ rest("/sessions").consumes("application/json").produces("application/json")
+
+            .get("/list").outTypeList(SparkSession.class)
+                .to("bean:sparkService?method=listSessions")
+
+            .post("/insert").type(SparkSession.class).outType(SparkSession.class)
+                .to("bean:sparkService?method=addSession")
+                
+            .delete("/remove").type(SparkSession.class).outType(SparkSession.class)
+                .to("bean:sparkService?method=deleteSession");
+
+/** SPARK SERVICE FOR SPARK SESSION **/
+public class SparkService {
+    
+    private final Map<Integer, SparkSession> sessions = new TreeMap<>();
+    private int id = 0;    
+
+    public SparkService() {
+
+    }
+
+    public Collection<SparkSession> listSessions() {
+        return sessions.values();
+    }
+
+    public SparkSession addSession(SparkSession session) {
+        session.setId(id);        
+        return sessions.put(id++, session);
+    }
+
+    public SparkSession deleteSession(SparkSession session) {
+        System.out.println(session.getId());
+        return sessions.remove(session.getId());
+    }
+    
+}
+
+/** QUERY ON YARN **/
+Process spark = new SparkLauncher()
+    .setSparkHome("/usr/local/src/spark-1.6.1-bin-hadoop2.6/")
+    .setMaster("yarn") .setDeployMode("cluster")
+    .setMainClass("com.example.filter_mail.FilterMail")
+    .setAppResource("/home/hduser/BizProject/filter_mail.jar")
+    .addAppArgs(mail) .launch();
+
+
+/** SCALA TO JAVA **/
+JavaRDD<String> mailSplitted = jsc.parallelize(Arrays.asList(mail.toString().split(" ")));                
+
+/** POM FOR YARN **/
+<dependency>
+    <groupId>org.apache.spark</groupId>
+    <artifactId>spark-yarn_2.11</artifactId>
+    <version>1.6.1</version>
+</dependency>
