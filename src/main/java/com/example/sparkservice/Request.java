@@ -18,9 +18,10 @@ public class Request {
     public Request() {
     }    
      
-    public Request(int id, String type) {
+    public Request(int id, String type, String state) {
         this.id = id;
         this.type = type;        
+        this.state = state;
     }
 
     public int getId() {

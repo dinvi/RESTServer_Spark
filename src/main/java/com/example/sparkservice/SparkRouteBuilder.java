@@ -26,10 +26,10 @@ public class SparkRouteBuilder extends RouteBuilder{
                 
             .get("/listReq").outTypeList(Request.class)
                 .to("bean:sparkServiceLauncher?method=listReq")
-
-            .post("/query").type(Mail.class).outType(Mail.class)
+                            
+            .post("/query").type(Mail.class).outType(Request.class)
                 .to("bean:sparkServiceLauncher?method=queryMail")
-                
+            
             .post("/train")
                 .to("bean:sparkServiceLauncher?method=train")                
         
@@ -37,7 +37,10 @@ public class SparkRouteBuilder extends RouteBuilder{
                 .to("bean:sparkServiceLauncher?method=updateHam")
                 
             .post("/updateSpam").type(Mail.class).outType(Request.class)
-                .to("bean:sparkServiceLauncher?method=updateSpam");
+                .to("bean:sparkServiceLauncher?method=updateSpam")
+                                
+            .get("/{id}").outType(Mail.class)
+                .to("bean:sparkServiceLauncher?method=getMailStatus(${header.id})");
             
     }
     

@@ -43,33 +43,18 @@ public class SparkService implements Serializable{
     private int idReq = 0;
 
     private static SparkConf conf;
-    private static JavaSparkContext jsc;
-
-    /** SPARK SERVICE ON YARN **/
-    /*
+    private static JavaSparkContext jsc;    
+ 
     public SparkService() {
         mails = new TreeMap<>();
-        requests = new TreeMap<>();         
-        conf = new SparkConf()
+        requests = new TreeMap<>();                                 
+        conf = new SparkConf()                                
                 .setAppName("FilterMail")
-                .setMaster("yarn-client")                 
-                .setSparkHome("/usr/local/src/spark-1.6.1-bin-hadoop2.6/");
-        jsc = new JavaSparkContext(conf);        
-    }
-    */
+                .setMaster("yarn-client")
+                .setSparkHome("/usr/local/src/spark-1.6.1-bin-hadoop2.6/");                                
+        jsc = new JavaSparkContext(conf);                         
+    }    
     
-    /** SPARK SERVICE LOCAL **/    
-    public SparkService() {
-        mails = new TreeMap<>();
-        requests = new TreeMap<>();
-        conf = new SparkConf()
-                .setAppName("FilterMail")
-                .setMaster("local")
-                .setSparkHome("/usr/local/src/spark/spark-1.6.1/");
-        jsc = new JavaSparkContext(conf);
-    }
-    
-
     public Collection<Mail> listMail() {
         System.out.println("Rotta List Mail");
         return mails.values();
@@ -79,22 +64,51 @@ public class SparkService implements Serializable{
         System.out.println("Rotta List Request");
         return requests.values();
     }
-
-    public void queryMail(Mail mail) {
+    
+    public Request queryMail(Mail mail) {
         System.out.println("Rotta Filter Mail");
-        mail.setId(idMail);
-        HashingTF tf = new HashingTF(10000);
-        Vector mailTF = tf.transform(Arrays.asList(mail.toString().split(" ")));
-        NaiveBayesModel model = NaiveBayesModel.load(jsc.sc(), PATH_MODEL);
-        double prediction = model.predict(mailTF);        
-        if (prediction == 0.0) {
-            mail.setClassification("HAM");
-        } else {
-            mail.setClassification("SPAM");
+        Request req = new Request(idReq,"UPDATE MODEL","RUNNING");
+        requests.put(idReq++, req);         
+        new QueryMail(mail).start();
+        return req;
+    }
+    
+    public Mail getMailStatus(String id) {
+        System.out.println("Rotta Status Mail");
+        Mail mail = mails.get(Integer.parseInt(id));
+        return mail;
+    }
+    
+    class QueryMail extends Thread{
+
+        Mail mail;
+        
+        public QueryMail(Mail mail){
+            this.mail = mail;
         }
-        mails.put(idMail++, mail);
+        
+        @Override
+        public void run() {
+            System.out.println("Rotta Filter Mail");
+            mail.setId(idMail);
+            HashingTF tf = new HashingTF(10000);
+            Vector mailTF = tf.transform(Arrays.asList(mail.toString().split(" ")));
+            NaiveBayesModel model = NaiveBayesModel.load(jsc.sc(), "/data/myNaiveBayesModel/");
+            double prediction = model.predict(mailTF);        
+            if (prediction == 0.0) {
+                mail.setClassification("HAM");
+            } else {
+                mail.setClassification("SPAM");
+            }            
+            Request req = requests.get(idMail);
+            req.setState("COMPLETE");
+            requests.put(idMail, req);
+            mails.put(idMail++, mail);
+        }
+        
     }
 
+    /*
     public Request updateHam(Mail mail) {
         Request req = new Request(idReq,"UPDATE MODEL");
         System.out.println("Rotta Update Ham");                
@@ -191,5 +205,7 @@ public class SparkService implements Serializable{
         JavaRDD<LabeledPoint> data = spamLabelledTF.union(hamLabelledTF);        
         return data;
     }
+    */
+    
 }
 
