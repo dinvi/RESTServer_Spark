@@ -65,6 +65,4 @@ public class Mail {
         return sender + " " + subject + " " + text;
     }
     
-    
-    
 }
