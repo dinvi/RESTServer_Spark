@@ -1030,3 +1030,81 @@ JavaRDD<String> mailSplitted = jsc.parallelize(Arrays.asList(mail.toString().spl
     </build>
         
 </project>
+
+
+/** ASYNCHRONOUS METHOD **/
+public Request queryMail(Mail mail) {        
+        Request req = new Request(idReq,"QUERY","RUNNING");
+        requests.put(idReq++, req); 
+        /*
+        Verrà lanciato in parallelo un thread che eseguirà tale richiesta
+        e verrà restituito un oggetto Request. Tramite l'ID della richiesta
+        il client sarà in grado di conoscere la classificazione della mail.
+        */
+        new QueryMail(mail).start();
+        requests.put(idMail, req);
+        mails.put(idMail++, mail);
+        return req;
+    }
+
+/**
+     * Metodo richiamato dal client in maniera asincrona per conoscere la
+     * classificazione della Mail precedentemente inviata.     
+     * @param id Id della relativa richiesta
+     * @return Mail classificata come SPAM o HAM.
+     */
+    public Mail getMailStatus(String id) {        
+        Mail mail = mails.get(Integer.parseInt(id));
+        return mail;
+    }
+
+
+/**
+     * Tale classe permette l'esecuzione in parallelo della richiesta di 
+     * classificazione di una mail.
+     */
+    class QueryMail extends Thread{
+        Mail mail;        
+        public QueryMail(Mail mail){
+            this.mail = mail;
+        }        
+        @Override
+        public void run() {            
+            mail.setId(idMail);
+            
+            HashingTF tf = new HashingTF(10000);
+            /*
+            La mail viene suddivisa in word eliminando tutti i caratteri di
+            spazio. Viene in seguito calcolata la TF - Term Frequency delle 
+            words che costituiscono la mail.
+             */
+            Vector mailTF = tf.transform(Arrays.asList(mail.toString().split(" ")));
+            
+            /*
+            Viene caricato il modello precedentemente addestrato.
+            */
+            NaiveBayesModel model = NaiveBayesModel.load(jsc.sc(), "/data/myNaiveBayesModel/");
+            
+            /*
+            Effettua la previsione della mail. 
+            Il modello ritorna il valore:
+            0.0 -> HAM
+            1.0 -> SPAM 
+            */
+            double prediction = model.predict(mailTF);        
+            if (prediction == 0.0) {
+                mail.setClassification("HAM");
+            } else {
+                mail.setClassification("SPAM");
+            }            
+            
+            /*
+            Viene modificato lo stato, da RUNNING in COMPLETE, della richiesta 
+            relativa alla classificazione della seguente mail.
+            */
+            Request req = requests.get(idMail);
+            req.setState("COMPLETE");
+            requests.put(idMail, req);
+            mails.put(idMail++, mail);
+        }        
+    }

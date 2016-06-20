@@ -7,7 +7,6 @@ package com.example.sparkservice;
 
 import java.io.IOException;
 import java.io.PrintWriter;
-import java.io.Serializable;
 import java.net.URI;
 import java.util.Arrays;
 import java.util.Collection;
@@ -33,7 +32,7 @@ import org.apache.spark.mllib.regression.LabeledPoint;
  *
  * @author daniele
  */
-public class SparkService implements Serializable{
+public class SparkService{
 
     /*
     Path relativi al modello e ai due dataset (mail classificate come HAM e 
@@ -106,29 +105,45 @@ public class SparkService implements Serializable{
      * @param mail Mail inviata al server da classificate
      * @return Request
      */
-    public Request queryMail(Mail mail) {        
-        Request req = new Request(idReq,"QUERY","RUNNING");
-        requests.put(idReq++, req); 
+    //Da modificare commento
+    public Mail queryMail(Mail mail) {        
+        Request req = new Request(idReq,"QUERY","RUNNING");        
+        HashingTF tf = new HashingTF(10000);
         /*
-        Verrà lanciato in parallelo un thread che eseguirà tale richiesta
-        e verrà restituito un oggetto Request. Tramite l'ID della richiesta
-        il client sarà in grado di conoscere la classificazione della mail.
+        La mail viene suddivisa in word eliminando tutti i caratteri di
+        spazio. Viene in seguito calcolata la TF - Term Frequency delle 
+        words che costituiscono la mail.
+         */
+        Vector mailTF = tf.transform(Arrays.asList(mail.toString().split(" ")));
+
+        /*
+        Viene caricato il modello precedentemente addestrato.
         */
-        new QueryMail(mail).start();
-        return req;
-    }
-    
-    /**
-     * Metodo richiamato dal client in maniera asincrona per conoscere la
-     * classificazione della Mail precedentemente inviata.     
-     * @param id Id della relativa richiesta
-     * @return Mail classificata come SPAM o HAM.
-     */
-    public Mail getMailStatus(String id) {        
-        Mail mail = mails.get(Integer.parseInt(id));
+        NaiveBayesModel model = NaiveBayesModel.load(jsc.sc(), "/data/myNaiveBayesModel/");
+
+        /*
+        Effettua la previsione della mail. 
+        Il modello ritorna il valore:
+        0.0 -> HAM
+        1.0 -> SPAM 
+        */
+        double prediction = model.predict(mailTF);        
+        if (prediction == 0.0) {
+            mail.setClassification("HAM");
+        } else {
+            mail.setClassification("SPAM");
+        }            
+
+        /*
+        Viene modificato lo stato, da RUNNING in COMPLETE, della richiesta 
+        relativa alla classificazione della seguente mail.
+        */            
+        req.setState("COMPLETE");
+        requests.put(idReq++, req); 
+        mails.put(idMail++, mail);
         return mail;
     }
-    
+
     /**
      * Metodo che permette l'eliminazione della directory in cui è salvato
      * il modello precedentemente addestrato.
@@ -167,7 +182,7 @@ public class SparkService implements Serializable{
             fs = FileSystem.get(URI.create(uri), config);
             FSDataOutputStream fsout = fs.append(new Path(uri));
             PrintWriter writer = new PrintWriter(fsout);
-            writer.append("\n" + mail);
+            writer.append(mail + "\n");
             writer.close();
             fs.close();
         } catch (IOException ex) {
@@ -291,56 +306,6 @@ public class SparkService implements Serializable{
             return false;
         }
         return true;
-    }
-    
-    /**
-     * Tale classe permette l'esecuzione in parallelo della richiesta di 
-     * classificazione di una mail.
-     */
-    class QueryMail extends Thread{
-        Mail mail;        
-        public QueryMail(Mail mail){
-            this.mail = mail;
-        }        
-        @Override
-        public void run() {            
-            mail.setId(idMail);
-            
-            HashingTF tf = new HashingTF(10000);
-            /*
-            La mail viene suddivisa in word eliminando tutti i caratteri di
-            spazio. Viene in seguito calcolata la TF - Term Frequency delle 
-            words che costituiscono la mail.
-             */
-            Vector mailTF = tf.transform(Arrays.asList(mail.toString().split(" ")));
-            
-            /*
-            Viene caricato il modello precedentemente addestrato.
-            */
-            NaiveBayesModel model = NaiveBayesModel.load(jsc.sc(), "/data/myNaiveBayesModel/");
-            
-            /*
-            Effettua la previsione della mail. 
-            Il modello ritorna il valore:
-            0.0 -> HAM
-            1.0 -> SPAM 
-            */
-            double prediction = model.predict(mailTF);        
-            if (prediction == 0.0) {
-                mail.setClassification("HAM");
-            } else {
-                mail.setClassification("SPAM");
-            }            
-            
-            /*
-            Viene modificato lo stato, da RUNNING in COMPLETE, della richiesta 
-            relativa alla classificazione della seguente mail.
-            */
-            Request req = requests.get(idMail);
-            req.setState("COMPLETE");
-            requests.put(idMail, req);
-            mails.put(idMail++, mail);
-        }        
     }
     
 }

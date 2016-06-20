@@ -41,8 +41,8 @@ public class SparkRouteBuilder extends RouteBuilder{
             /*
             Rotta che permette l'invio di una query al server per 
             conoscere la classificazione di una mail.
-            */
-            .post("/query").type(Mail.class).outType(Request.class)
+            */            
+            .post("/query").type(Mail.class).outType(Mail.class)
                 .to("bean:sparkServiceLauncher?method=queryMail")
             
             /*
