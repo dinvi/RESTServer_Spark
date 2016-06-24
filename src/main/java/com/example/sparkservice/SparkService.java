@@ -103,9 +103,8 @@ public class SparkService{
      * Rotta che permette l'invio di una query al server per conoscere la 
      * classificazione di una mail.
      * @param mail Mail inviata al server da classificate
-     * @return Request
-     */
-    //Da modificare commento
+     * @return Mail etichettata come Spam o Ham
+     */    
     public Mail queryMail(Mail mail) {        
         Request req = new Request(idReq,"QUERY","RUNNING");        
         HashingTF tf = new HashingTF(10000);
@@ -114,7 +113,7 @@ public class SparkService{
         spazio. Viene in seguito calcolata la TF - Term Frequency delle 
         words che costituiscono la mail.
          */
-        Vector mailTF = tf.transform(Arrays.asList(mail.toString().split(" ")));
+        Vector mailTF = tf.transform(Arrays.asList(mail.toString().toLowerCase().split(" ")));
 
         /*
         Viene caricato il modello precedentemente addestrato.
@@ -182,7 +181,7 @@ public class SparkService{
             fs = FileSystem.get(URI.create(uri), config);
             FSDataOutputStream fsout = fs.append(new Path(uri));
             PrintWriter writer = new PrintWriter(fsout);
-            writer.append(mail + "\n");
+            writer.append(mail.replace( '\n',' ' ).replace( '\r', ' ' ) + "\n");
             writer.close();
             fs.close();
         } catch (IOException ex) {
@@ -258,14 +257,14 @@ public class SparkService{
         */
         JavaRDD<LabeledPoint> hamLabelledTF = ham.map(new Function<String, LabeledPoint>() {
             @Override
-            public LabeledPoint call(String email) {
-                return new LabeledPoint(0, tf.transform(Arrays.asList(email.split(" "))));
+            public LabeledPoint call(String email) {                
+                return new LabeledPoint(0, tf.transform(Arrays.asList(email.toLowerCase().split(" "))));
             }
         });
         JavaRDD<LabeledPoint> spamLabelledTF = spam.map(new Function<String, LabeledPoint>() {
             @Override
             public LabeledPoint call(String email) {
-                return new LabeledPoint(1, tf.transform(Arrays.asList(email.split(" "))));
+                return new LabeledPoint(1, tf.transform(Arrays.asList(email.toLowerCase().split(" "))));
             }
         });
         
@@ -296,7 +295,7 @@ public class SparkService{
             /*
             Effettua addestramento modello con datasets aggiornati.
             */
-            NaiveBayesModel model = NaiveBayes.train(data.rdd(), 1.0, "multinomial");        
+            NaiveBayesModel model = NaiveBayes.train(data.rdd(), 1.0);        
             /*
             Una volta completato l'addestramento viene salvato il modello.
             */
