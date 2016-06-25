@@ -20,7 +20,13 @@ public class Request {
      
     public Request(int id, String type) {
         this.id = id;
+        this.type = type;                
+    }
+    
+    public Request(int id, String type, String state) {
+        this.id = id;
         this.type = type;        
+        this.state = state;
     }
 
     public int getId() {

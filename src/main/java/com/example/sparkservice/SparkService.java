@@ -5,18 +5,21 @@
  */
 package com.example.sparkservice;
 
-import java.io.BufferedWriter;
-import java.io.File;
-import java.io.FileWriter;
 import java.io.IOException;
 import java.io.PrintWriter;
-import java.io.Serializable;
+import java.net.URI;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FSDataOutputStream;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
 import org.apache.spark.SparkConf;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
@@ -31,98 +34,322 @@ import org.apache.spark.mllib.regression.LabeledPoint;
  *
  * @author daniele
  */
-public class SparkService implements Serializable{
+public class SparkService{
 
-    private final String PATH_MODEL = "/home/hduser/BizProject/myNaiveBayesModel/";
-    private final String PATH_HAM_DATA = "/home/hduser/BizProject/ham.txt";
-    private final String PATH_SPAM_DATA = "/home/hduser/BizProject/spam.txt";
+    /*
+    Path relativi al modello e ai due dataset (mail classificate come HAM e 
+    mail classificate come SPAM). I path sono relativi al filesystem HDFS in
+    quanto la richiesta sarà deployata su Hadoop.    
+    */
+    private static final String PATH_MODEL = "hdfs://localhost:54310/data/myNaiveBayesModel";
+    private static final String PATH_HAM_DATA = "hdfs://localhost:54310/data/ham.txt";
+    private static final String PATH_SPAM_DATA = "hdfs://localhost:54310/data/spam.txt";    
 
+    /*
+    Lista di Mail classificate dal Server.
+    */
     private final Map<Integer, Mail> mails; 
+    
+    /*
+    Lista di Request (query o aggiornamento del modello) inviate al Server.
+    */
     private final Map<Integer, Request> requests;
+    
+    /*
+    Lista di String contenente mittenti ritenuti attendibili. Viene aggiunto
+    un elemento nel caso in cui il modello classifica erroneamente come spam 
+    una mail.         
+    */
+    private final List<String> white_list;
+    
+    /*
+    Lista di String contenente mittenti ritenuti non attendibili. Viene 
+    aggiunto un elemento nel caso in cui il modello classifica erroneamente 
+    come ham una mail.         
+    */
+    private final List<String> black_list;
+        
     private int idMail = 0;
     private int idReq = 0;
 
     private static SparkConf conf;
-    private static JavaSparkContext jsc;
-
-    /** SPARK SERVICE ON YARN **/
-    /*
+    private static JavaSparkContext jsc;    
+ 
     public SparkService() {
         mails = new TreeMap<>();
-        requests = new TreeMap<>();         
-        conf = new SparkConf()
-                .setAppName("FilterMail")
-                .setMaster("yarn-client")                 
-                .setSparkHome("/usr/local/src/spark-1.6.1-bin-hadoop2.6/");
-        jsc = new JavaSparkContext(conf);        
-    }
-    */
-    
-    /** SPARK SERVICE LOCAL **/    
-    public SparkService() {
-        mails = new TreeMap<>();
-        requests = new TreeMap<>();
-        conf = new SparkConf()
-                .setAppName("FilterMail")
-                .setMaster("local")
-                .setSparkHome("/usr/local/src/spark/spark-1.6.1/");
-        jsc = new JavaSparkContext(conf);
-    }
-    
-
-    public Collection<Mail> listMail() {
-        System.out.println("Rotta List Mail");
+        requests = new TreeMap<>();  
+        white_list = new ArrayList<>();
+        black_list = new ArrayList<>();
+        conf = new SparkConf()                                
+                .setAppName("BizMail")
+                //effettuaiamo il deploy su yarn
+                .setMaster("yarn-client")
+                //settiamo la directory in cui è presente SPARK
+                .setSparkHome("/usr/local/src/spark-1.6.1-bin-hadoop2.6/");                                
+        jsc = new JavaSparkContext(conf);         
+        /*
+        All'avvio il server effettuerà l'addestramento del modello        
+        */        
+        train();        
+    }    
+        
+    /**
+     * Metodo richiamato dalla rotta "mail/listMail" - GET.
+     * Permette la visualizzazione di tutte le email che sono state inviate al
+     * server per essere classificate.                     
+     * @return Lista di Mail
+     */
+    public Collection<Mail> listMail() {        
         return mails.values();
     }
-    
-    public Collection<Request> listReq() {
-        System.out.println("Rotta List Request");
+   
+    /**
+     * Metodo richiamato dalla rotta "mail/listReq" - GET.
+     * Permette la visualizzazione di tutte le richieste inviate al server. 
+     * La richesta può essere o una semplice query per conoscere la 
+     * classificazione di una mail o una richiesta di aggiornamento del modello 
+     * in seguito ad una classificazione del modello errata.
+     * @return Lista di richieste.
+     */
+    public Collection<Request> listReq() {        
         return requests.values();
     }
-
-    public void queryMail(Mail mail) {
-        System.out.println("Rotta Filter Mail");
+    
+    
+    /**
+     * Metodo richiamato dalla rotta "mail/query" - POST.
+     * Rotta che permette l'invio di una query al server per conoscere la 
+     * classificazione di una mail. Inizialmente viene verificato se 
+     * il Sender di tale mail è presente nella white-list o black-list. In tal
+     * caso non viene effettuata la previsione del modello ma in automatico 
+     * viene etichettata la mail sulla base della presenza del sender o nella 
+     * white-list o nella black-list. 
+     * In caso contrario viene effettuata la previsone del modello.
+     * @param mail Mail inviata al server da classificate
+     * @return Mail etichettata come Spam o Ham
+     */    
+    public Mail queryMail(Mail mail) {        
+        Request req = new Request(idReq,"QUERY","RUNNING");        
         mail.setId(idMail);
+        
+        if(white_list.contains(mail.getSender())){
+            req.setState("COMPLETE");
+            requests.put(idReq++, req); 
+            mail.setClassification("HAM");
+            mails.put(idMail++, mail);
+            /*
+            Viene riaddestrato il modello inserendo tale mail in append al
+            dataset ham.txt            
+            Viene effettuato solo in questo caso in quanto il modello in 
+            precedenza aveva ritenuto non attendibile una mail proveniente
+            da quell'indirizzo.
+            */                    
+            updateHam(mail);
+            return mail;
+        }else if(black_list.contains(mail.getSender())){
+            req.setState("COMPLETE");
+            requests.put(idReq++, req); 
+            mail.setClassification("SPAM");
+            mails.put(idMail++, mail);
+            /*
+            Viene riaddestrato il modello inserendo tale mail in append al
+            dataset spam.txt            
+            Viene effettuato solo in questo caso in quanto il modello in 
+            precedenza aveva ritenuto attendibile una mail proveniente
+            da quell'indirizzo.
+            */                 
+            updateSpam(mail);
+            return mail;
+        }
+        
         HashingTF tf = new HashingTF(10000);
-        Vector mailTF = tf.transform(Arrays.asList(mail.toString().split(" ")));
-        NaiveBayesModel model = NaiveBayesModel.load(jsc.sc(), PATH_MODEL);
+        /*
+        La mail viene suddivisa in word eliminando tutti i caratteri di
+        spazio. Viene in seguito calcolata la TF - Term Frequency delle 
+        words che costituiscono la mail.
+         */
+        Vector mailTF = tf.transform(Arrays.asList(mail.toString().toLowerCase().split(" ")));
+
+        /*
+        Viene caricato il modello precedentemente addestrato.
+        */
+        NaiveBayesModel model = NaiveBayesModel.load(jsc.sc(), "/data/myNaiveBayesModel/");
+
+        /*
+        Effettua la previsione della mail. 
+        Il modello ritorna il valore:
+        0.0 -> HAM
+        1.0 -> SPAM 
+        */
         double prediction = model.predict(mailTF);        
         if (prediction == 0.0) {
             mail.setClassification("HAM");
         } else {
             mail.setClassification("SPAM");
-        }
-        mails.put(idMail++, mail);
-    }
+        }            
 
+        /*
+        Viene modificato lo stato, da RUNNING in COMPLETE, della richiesta 
+        relativa alla classificazione della seguente mail.
+        */            
+        req.setState("COMPLETE");
+        requests.put(idReq++, req); 
+        mails.put(idMail++, mail);
+        return mail;
+    }
+    
+    /**
+     * Metodo che permette l'eliminazione della directory in cui è salvato
+     * il modello precedentemente addestrato.
+     * Il server prima di effettuare un nuovo addestramento eliminerà tale
+     * directory.
+     * @return True se l'eliminazione viene eseguita con successo; 
+     *         False se viene sollevata qualche eccezione.
+     */
+    public boolean deleteModel(){    
+        //Configuration di HADOOP
+        Configuration config = new Configuration();
+        try {
+            //File system HDFS
+            FileSystem fs = FileSystem.get(URI.create(PATH_MODEL), config);
+            fs.delete(new Path(PATH_MODEL), true);
+            fs.close();
+        } catch (IOException ex) {
+            Logger.getLogger(SparkService.class.getName()).log(Level.SEVERE, null, ex);
+            return false;
+        }
+        return true;
+    }
+    
+    /**
+     * Metodo che permette l'append della mail classificata erroneamente dal 
+     * server nel dataset corretto.
+     * I dataset sono due file, uno contenente tutte le mail classificate come
+     * HAM, l'altro tutte le mail classificate come SPAM.
+     * @param uri Path del dataset 
+     * @param mail Testo della mail
+     */
+    public void appendData(String uri, String mail){                       
+        Configuration config = new Configuration();
+        FileSystem fs;
+        try {
+            fs = FileSystem.get(URI.create(uri), config);
+            FSDataOutputStream fsout = fs.append(new Path(uri));
+            PrintWriter writer = new PrintWriter(fsout);
+            writer.append(mail.replace( '\n',' ' ).replace( '\r', ' ' ) + "\n");
+            writer.close();
+            fs.close();
+        } catch (IOException ex) {
+            Logger.getLogger(SparkService.class.getName()).log(Level.SEVERE, null, ex);
+        }
+    }
+    
+    /**
+     * Metodo richiamato dalla rotta "mail/updateHam" - POST.
+     * Tale metodo permette l'aggiornamento del modello in seguito ad una 
+     * classificazione errata. In questo caso il modello ha classificato 
+     * erroneamente una mail come SPAM invece di HAM. Inizialmente viene 
+     * aggiunto il sender dell'oggetto Mail nella lista degli indirizzi 
+     * attendibili (white-list) e successivamente viene effettuato 
+     * l'aggiornamento del modello.
+     * @param mail Mail erroneamente classificata.
+     * @return Request relativa.
+     */
     public Request updateHam(Mail mail) {
-        Request req = new Request(idReq,"UPDATE MODEL");
-        System.out.println("Rotta Update Ham");                
+        if(!white_list.contains(mail.getSender()))
+            white_list.add(mail.getSender());
+        Request req = new Request(idReq,"UPDATE MODEL");               
         appendData(PATH_HAM_DATA, mail.toString());
         if(train())
             req.setState("SUCCESS");
         else
             req.setState("FAILED");
         requests.put(idReq++, req);
-        return req;
+        return req;        
     }
-
-    public Request updateSpam(Mail mail) {        
-        Request req = new Request(idReq++,"UPDATE MODEL");
-        System.out.println("Rotta Update Spam");        
+    
+     /**
+     * Metodo richiamato dalla rotta "mail/updateSpam" - POST.
+     * Tale metodo permette l'aggiornamento del modello in seguito ad una 
+     * classificazione errata. In questo caso il modello ha classificato 
+     * erroneamente una mail come HAM invece di SPAM. Inizialmente viene 
+     * aggiunto il sender dell'oggetto Mail nella lista degli indirizzi 
+     * non attendibili (black-list) e successivamente viene effettuato 
+     * l'aggiornamento del modello.           
+     * @param mail Mail erroneamente classificata.
+     * @return Request relativa.
+     */
+    public Request updateSpam(Mail mail) { 
+        if(!black_list.contains(mail.getSender()))
+            black_list.add(mail.getSender());
+        Request req = new Request(idReq,"UPDATE MODEL");        
         appendData(PATH_SPAM_DATA, mail.toString());
         if(train())
             req.setState("SUCCESS");
         else
             req.setState("FAILED");
         requests.put(idReq++, req);
-        return req;
+        return req;        
     }
-
-    public boolean train() {
-        System.out.println("Rotta Training Model");
-        File dir_model = new File(PATH_MODEL);
-        if(deleteModel(dir_model))
+    
+    /**
+     * Metodo che elabora i dataset presenti.
+     * Sono presenti due file, uno contenente tutte le mail correttamente
+     * etichettate come HAM, l'altro quelle etichettate come SPAM.      
+     * @return Ritorna un RDD in cui sono presenti tutte le mail con le 
+     * loro relative etichette.
+     */
+    public static JavaRDD<LabeledPoint> dataset(){
+        final HashingTF tf = new HashingTF(10000);         
+        /*
+        Importiamo il testo delle mail etichettate come HAM
+        (testo inteso come Sender, Subject e Text).
+        */
+        JavaRDD<String> ham = jsc.textFile(PATH_HAM_DATA);
+        /*
+        Importiamo il testo delle mail etichettate come SPAM
+        (testo inteso come Sender, Subject e Text).
+        */
+        JavaRDD<String> spam = jsc.textFile(PATH_SPAM_DATA);
+        
+        /*
+        Effettua trasformazione testo di ogni singola mail in Hashing TF - Term 
+        Frequency dopo aver rimosso gli spazi. La TF rappresenta il numero di 
+        volte che il termine appare nel documento.
+        Dopo la seguente trasformazione mapparemo le word in base alla label:
+        1 - SPAM
+        0 - HAM
+        */
+        JavaRDD<LabeledPoint> hamLabelledTF = ham.map(new Function<String, LabeledPoint>() {
+            @Override
+            public LabeledPoint call(String email) {                
+                return new LabeledPoint(0, tf.transform(Arrays.asList(email.toLowerCase().split(" "))));
+            }
+        });
+        JavaRDD<LabeledPoint> spamLabelledTF = spam.map(new Function<String, LabeledPoint>() {
+            @Override
+            public LabeledPoint call(String email) {
+                return new LabeledPoint(1, tf.transform(Arrays.asList(email.toLowerCase().split(" "))));
+            }
+        });
+        
+        /*
+        Uniamo i due insiemi precedentemente ricavati ed elaborati.
+        */
+        JavaRDD<LabeledPoint> data = spamLabelledTF.union(hamLabelledTF);        
+        return data;
+    }
+   
+    /**
+     * Metodo richiamato dalla rotta "mail/train" - POST.
+     * Tale metodo permette l'addestramento del modello sulla base di un 
+     * dataset iniziale di mail correttamente etichettate come SPAM o HAM. 
+     * I dataset sono stati importati da SpamAssassin.
+     * @return True se l'addestramento viene eseguita con successo; 
+     *         False se viene sollevata qualche eccezione.
+     */
+    public boolean train() {        
+        if(deleteModel())
             System.out.println("Model Successfully deleted");
         else
             System.out.println("Model not deleted");
@@ -130,7 +357,13 @@ public class SparkService implements Serializable{
         try{
             JavaRDD<LabeledPoint> data = dataset();        
         
-            NaiveBayesModel model = NaiveBayes.train(data.rdd(), 1.0, "multinomial");        
+            /*
+            Effettua addestramento modello con datasets aggiornati.
+            */
+            NaiveBayesModel model = NaiveBayes.train(data.rdd(), 1.0);        
+            /*
+            Una volta completato l'addestramento viene salvato il modello.
+            */
             model.save(jsc.sc(), PATH_MODEL);
         }catch(Exception e){
             e.printStackTrace();
@@ -138,58 +371,5 @@ public class SparkService implements Serializable{
         }
         return true;
     }
-
-    public void appendData(String path, String mail) {
-        FileWriter fw = null;
-        try {
-            File data = new File(path);
-            fw = new FileWriter(data, true);
-            BufferedWriter bw = new BufferedWriter(fw);
-            PrintWriter out = new PrintWriter(bw);
-            out.println(mail);
-            out.close();
-        } catch (IOException ex) {
-            Logger.getLogger(SparkService.class.getName()).log(Level.SEVERE, null, ex);
-        } finally {
-            try {
-                fw.close();
-            } catch (IOException ex) {
-                Logger.getLogger(SparkService.class.getName()).log(Level.SEVERE, null, ex);
-            }
-        }
-    }
-
-    public boolean deleteModel(File model) {
-        if (model.isDirectory()) {
-            String[] children = model.list();
-            for (int i = 0; i < children.length; i++) {
-                boolean success = deleteModel(new File(model, children[i]));
-                if (!success) {
-                    return false;
-                }
-            }
-        }
-        return model.delete();
-    }
     
-    public static JavaRDD<LabeledPoint> dataset(){
-        final HashingTF tf = new HashingTF(10000); 
-        JavaRDD<String> ham = jsc.textFile("/home/hduser/BizProject/ham.txt");
-        JavaRDD<String> spam = jsc.textFile("/home/hduser/BizProject/spam.txt");
-        JavaRDD<LabeledPoint> hamLabelledTF = ham.map(new Function<String, LabeledPoint>() {
-            @Override
-            public LabeledPoint call(String email) {
-                return new LabeledPoint(0, tf.transform(Arrays.asList(email.split(" "))));
-            }
-        });
-        JavaRDD<LabeledPoint> spamLabelledTF = spam.map(new Function<String, LabeledPoint>() {
-            @Override
-            public LabeledPoint call(String email) {
-                return new LabeledPoint(1, tf.transform(Arrays.asList(email.split(" "))));
-            }
-        });
-        JavaRDD<LabeledPoint> data = spamLabelledTF.union(hamLabelledTF);        
-        return data;
-    }
 }
-
