@@ -8,8 +8,10 @@ package com.example.sparkservice;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.net.URI;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.logging.Level;
@@ -41,7 +43,7 @@ public class SparkService{
     */
     private static final String PATH_MODEL = "hdfs://localhost:54310/data/myNaiveBayesModel";
     private static final String PATH_HAM_DATA = "hdfs://localhost:54310/data/ham.txt";
-    private static final String PATH_SPAM_DATA = "hdfs://localhost:54310/data/spam.txt";
+    private static final String PATH_SPAM_DATA = "hdfs://localhost:54310/data/spam.txt";    
 
     /*
     Lista di Mail classificate dal Server.
@@ -52,6 +54,20 @@ public class SparkService{
     Lista di Request (query o aggiornamento del modello) inviate al Server.
     */
     private final Map<Integer, Request> requests;
+    
+    /*
+    Lista di String contenente mittenti ritenuti attendibili. Viene aggiunto
+    un elemento nel caso in cui il modello classifica erroneamente come spam 
+    una mail.         
+    */
+    private final List<String> white_list;
+    
+    /*
+    Lista di String contenente mittenti ritenuti non attendibili. Viene 
+    aggiunto un elemento nel caso in cui il modello classifica erroneamente 
+    come ham una mail.         
+    */
+    private final List<String> black_list;
         
     private int idMail = 0;
     private int idReq = 0;
@@ -61,7 +77,9 @@ public class SparkService{
  
     public SparkService() {
         mails = new TreeMap<>();
-        requests = new TreeMap<>();                                                 
+        requests = new TreeMap<>();  
+        white_list = new ArrayList<>();
+        black_list = new ArrayList<>();
         conf = new SparkConf()                                
                 .setAppName("BizMail")
                 //effettuaiamo il deploy su yarn
@@ -71,7 +89,7 @@ public class SparkService{
         jsc = new JavaSparkContext(conf);         
         /*
         All'avvio il server effettuerà l'addestramento del modello        
-        */
+        */        
         train();        
     }    
         
@@ -101,12 +119,49 @@ public class SparkService{
     /**
      * Metodo richiamato dalla rotta "mail/query" - POST.
      * Rotta che permette l'invio di una query al server per conoscere la 
-     * classificazione di una mail.
+     * classificazione di una mail. Inizialmente viene verificato se 
+     * il Sender di tale mail è presente nella white-list o black-list. In tal
+     * caso non viene effettuata la previsione del modello ma in automatico 
+     * viene etichettata la mail sulla base della presenza del sender o nella 
+     * white-list o nella black-list. 
+     * In caso contrario viene effettuata la previsone del modello.
      * @param mail Mail inviata al server da classificate
      * @return Mail etichettata come Spam o Ham
      */    
     public Mail queryMail(Mail mail) {        
         Request req = new Request(idReq,"QUERY","RUNNING");        
+        mail.setId(idMail);
+        
+        if(white_list.contains(mail.getSender())){
+            req.setState("COMPLETE");
+            requests.put(idReq++, req); 
+            mail.setClassification("HAM");
+            mails.put(idMail++, mail);
+            /*
+            Viene riaddestrato il modello inserendo tale mail in append al
+            dataset ham.txt            
+            Viene effettuato solo in questo caso in quanto il modello in 
+            precedenza aveva ritenuto non attendibile una mail proveniente
+            da quell'indirizzo.
+            */                    
+            updateHam(mail);
+            return mail;
+        }else if(black_list.contains(mail.getSender())){
+            req.setState("COMPLETE");
+            requests.put(idReq++, req); 
+            mail.setClassification("SPAM");
+            mails.put(idMail++, mail);
+            /*
+            Viene riaddestrato il modello inserendo tale mail in append al
+            dataset spam.txt            
+            Viene effettuato solo in questo caso in quanto il modello in 
+            precedenza aveva ritenuto attendibile una mail proveniente
+            da quell'indirizzo.
+            */                 
+            updateSpam(mail);
+            return mail;
+        }
+        
         HashingTF tf = new HashingTF(10000);
         /*
         La mail viene suddivisa in word eliminando tutti i caratteri di
@@ -142,7 +197,7 @@ public class SparkService{
         mails.put(idMail++, mail);
         return mail;
     }
-
+    
     /**
      * Metodo che permette l'eliminazione della directory in cui è salvato
      * il modello precedentemente addestrato.
@@ -193,11 +248,16 @@ public class SparkService{
      * Metodo richiamato dalla rotta "mail/updateHam" - POST.
      * Tale metodo permette l'aggiornamento del modello in seguito ad una 
      * classificazione errata. In questo caso il modello ha classificato 
-     * erroneamente una mail come SPAM invece di HAM.            
+     * erroneamente una mail come SPAM invece di HAM. Inizialmente viene 
+     * aggiunto il sender dell'oggetto Mail nella lista degli indirizzi 
+     * attendibili (white-list) e successivamente viene effettuato 
+     * l'aggiornamento del modello.
      * @param mail Mail erroneamente classificata.
      * @return Request relativa.
      */
     public Request updateHam(Mail mail) {
+        if(!white_list.contains(mail.getSender()))
+            white_list.add(mail.getSender());
         Request req = new Request(idReq,"UPDATE MODEL");               
         appendData(PATH_HAM_DATA, mail.toString());
         if(train())
@@ -205,18 +265,23 @@ public class SparkService{
         else
             req.setState("FAILED");
         requests.put(idReq++, req);
-        return req;
+        return req;        
     }
     
      /**
      * Metodo richiamato dalla rotta "mail/updateSpam" - POST.
      * Tale metodo permette l'aggiornamento del modello in seguito ad una 
      * classificazione errata. In questo caso il modello ha classificato 
-     * erroneamente una mail come HAM invece di SPAM.            
+     * erroneamente una mail come HAM invece di SPAM. Inizialmente viene 
+     * aggiunto il sender dell'oggetto Mail nella lista degli indirizzi 
+     * non attendibili (black-list) e successivamente viene effettuato 
+     * l'aggiornamento del modello.           
      * @param mail Mail erroneamente classificata.
      * @return Request relativa.
      */
-    public Request updateSpam(Mail mail) {        
+    public Request updateSpam(Mail mail) { 
+        if(!black_list.contains(mail.getSender()))
+            black_list.add(mail.getSender());
         Request req = new Request(idReq,"UPDATE MODEL");        
         appendData(PATH_SPAM_DATA, mail.toString());
         if(train())
@@ -224,7 +289,7 @@ public class SparkService{
         else
             req.setState("FAILED");
         requests.put(idReq++, req);
-        return req;
+        return req;        
     }
     
     /**
